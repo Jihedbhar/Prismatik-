@@ -1,0 +1,80 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Environment
+.env
+.venv/
+venv/
+env/
+ENV/
+myapp/
+# Jupyter notebooks checkpoints
+.ipynb_checkpoints/
+
+
+# VSCode config
+.vscode/
+
+# macOS system files
+.DS_Store
+
+# Streamlit cache & config
+.streamlit/config.toml
+.streamlit/secrets.toml
+**/.streamlit/*.json
+
+# Data files
+*.csv
+*.tsv
+*.parquet
+*.db
+*.sqlite
+*.log
+*.bak
+
+# Model artifacts
+*.pkl
+*.joblib
+*.h5
+
+# Python packaging
+*.egg
+*.egg-info/
+dist/
+build/
+pip-wheel-metadata/
+
+# Logs
+*.log
+
+# IDEs
+.idea/
+*.iml
+
+# Test results
+coverage.xml
+htmlcov/
+.tox/
+
+# PyInstaller
+*.spec
+
+# Unit test cache
+.pytest_cache/
+.cache/
+
+# Images, outputs, or user uploads
+/media/
+*.png
+*.jpg
+*.jpeg
+*.gif
+uploads/
+outputs/
+
+mappings
+temp
+test.ipynb
+users.json
