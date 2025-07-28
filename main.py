@@ -92,8 +92,8 @@ def home_page():
     st.markdown('<div class="main">', unsafe_allow_html=True)
     
     # Header
-    st.markdown('<h1>🏬 Retail Database Management App</h1>', unsafe_allow_html=True)
-    st.markdown('<p class="welcome-text">Welcome to your all-in-one solution for managing retail databases! Connect, explore, and analyze your data with ease.</p>', unsafe_allow_html=True)
+    st.markdown('<h1>🏬 Prismatik : Retail Database Management App</h1>', unsafe_allow_html=True)
+    st.markdown('<p class="Welcome to Prismatik, your all-in-one solution to seamlessly manage, explore, and analyze your retail data. Simplify your database tasks and unlock insights effortlessly!</p>', unsafe_allow_html=True)
     
     # Features section
     st.markdown('<h2>✨ Key Features</h2>', unsafe_allow_html=True)
