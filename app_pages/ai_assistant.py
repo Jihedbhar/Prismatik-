@@ -390,12 +390,133 @@ def safe_get(df, column, default=None):
         logger.error(f"Error in process_ai_request: {str(e)}")
         return {'role': 'assistant', 'content': "Error processing request. Please try again."}
 
+def textual_analysis_agent(query, df, api_endpoint, api_key, api_version, context=None):
+    """Textual Analysis Agent: Generates Python code for textual responses"""
+    try:
+        prompt = f"""
+        USER QUERY: {query}
+        AVAILABLE COLUMNS: {', '.join(df.columns)}
+        INSTRUCTIONS:
+        - Generate Python code to answer the query using `df` (Pandas DataFrame, {len(df)} rows).
+        - Focus on textual outputs (e.g., summaries, statistics, specific queries).
+        - Use exact column names from AVAILABLE COLUMNS.
+        - Return code in format:
+          ```python
+          # [Brief comment]
+          [Code]
+          print("[Result description]: [Result]")
+          ```
+        - If columns are missing, print: "Information not available due to missing columns: [list]."
+        """
+        headers = {"api-key": api_key, "Content-Type": "application/json"}
+        api_url = f"{api_endpoint.rstrip('/')}/openai/deployments/gpt-4-turbo/chat/completions"
+        payload = {
+            "messages": [{"role": "user", "content": prompt}],
+            "max_tokens": 1000,
+            "temperature": 0
+        }
+        response = requests.post(api_url, headers=headers, json=payload, params={"api-version": api_version}, timeout=30)
+        response.raise_for_status()
+        content = response.json()['choices'][0]['message']['content'].strip()
+        code = extract_python_code(content)
+        if not code:
+            return {'content': "No valid code generated.", 'interpretation': None, 'figure': None}
+        
+        exec_globals = {'plt': plt, 'sns': sns, 'df': df.copy(), 'pd': pd, 'np': __import__('numpy')}
+        with StringIO() as buf, contextlib.redirect_stdout(buf):
+            exec(code, exec_globals)
+            interpretation = buf.getvalue().strip() or "Textual analysis completed."
+        
+        return {'content': content.replace(f"```python\n{code}\n```", "").strip(), 'interpretation': interpretation, 'figure': None}
+    except Exception as e:
+        logger.error(f"Textual Analysis Agent error: {str(e)}")
+        return {'content': f"Error: {str(e)}", 'interpretation': None, 'figure': None}
+
+def visual_analysis_agent(query, df, api_endpoint, api_key, api_version, context=None):
+    """Visual Analysis Agent: Generates Python code for visualizations"""
+    try:
+        prompt = f"""
+        USER QUERY: {query}
+        AVAILABLE COLUMNS: {', '.join(df.columns)}
+        INSTRUCTIONS:
+        - Generate Python code to create a visualization (e.g., bar, line, histogram) using `df` ({len(df)} rows).
+        - Use matplotlib/seaborn, set plt.figure(figsize=(12, 8)), plt.tight_layout().
+        - Do NOT include plt.show().
+        - Return code in format:
+          ```python
+          # [Brief comment]
+          [Code]
+          print("[Result description]: [Result]")
+          ```
+        - If columns are missing, print: "Information not available due to missing columns: [list]."
+        """
+        headers = {"api-key": api_key, "Content-Type": "application/json"}
+        api_url = f"{api_endpoint.rstrip('/')}/openai/deployments/gpt-4-turbo/chat/completions"
+        payload = {
+            "messages": [{"role": "user", "content": prompt}],
+            "max_tokens": 1000,
+            "temperature": 0
+        }
+        response = requests.post(api_url, headers=headers, json=payload, params={"api-version": api_version}, timeout=30)
+        response.raise_for_status()
+        content = response.json()['choices'][0]['message']['content'].strip()
+        code = extract_python_code(content)
+        if not code:
+            return {'content': "No valid visualization code generated.", 'interpretation': None, 'figure': None}
+        
+        plt.clf()
+        exec_globals = {'plt': plt, 'sns': sns, 'df': df.copy(), 'pd': pd, 'np': __import__('numpy')}
+        with StringIO() as buf, contextlib.redirect_stdout(buf):
+            exec(code, exec_globals)
+            interpretation = buf.getvalue().strip() or "Visualization generated."
+        
+        fig = plt.gcf()
+        response = {'content': content.replace(f"```python\n{code}\n```", "").strip(), 'interpretation': interpretation}
+        if len(fig.axes) > 0:
+            fig.tight_layout()
+            response['figure'] = fig
+        return response
+    except Exception as e:
+        logger.error(f"Visual Analysis Agent error: {str(e)}")
+        return {'content': f"Error: {str(e)}", 'interpretation': None, 'figure': None}
+
+def agentic_orchestrator(query, df, messages, api_endpoint, api_key, api_version):
+    """Orchestrator: Coordinates agentic processing for V2"""
+    try:
+        # Simple task classification (expand with Planner Agent for complex queries)
+        query_lower = query.lower()
+        is_visual = any(keyword in query_lower for keyword in ['plot', 'graph', 'visualize', 'histogram', 'chart'])
+        
+        # Shared context (e.g., conversation history)
+        context = format_conversation_history(messages)
+        
+        if is_visual:
+            response = visual_analysis_agent(query, df, api_endpoint, api_key, api_version, context)
+        else:
+            response = textual_analysis_agent(query, df, api_endpoint, api_key, api_version, context)
+        
+        return {'role': 'assistant', **response}
+    except Exception as e:
+        logger.error(f"Orchestrator error: {str(e)}")
+        return {'role': 'assistant', 'content': f"Error processing request: {str(e)}", 'interpretation': None, 'figure': None}
+
 def ai_assistant_page():
-    """AI Assistant page for business data analysis"""
-    st.markdown(f'<h1 style="color: {COLORS["primary"]};">🤖 AI Business Analyst</h1>', unsafe_allow_html=True)
+    """AI Assistant page with V1/V2 toggle"""
+    # Header with dropdown
+    col1, col2 = st.columns([3, 1])
+    with col1:
+        st.markdown(f'<h1 style="color: {COLORS["primary"]};">🤖 AI Business Analyst</h1>', unsafe_allow_html=True)
+    with col2:
+        mode = st.selectbox(
+            "Select Assistant Mode",
+            ["V1 (Classic)", "V2 (BETA - Agentic)"],
+            key="assistant_mode",
+            help="Choose between classic (V1) and agentic (V2) modes"
+        )
+    
     st.markdown(f'<p style="color: {COLORS["text"]};">Ask about your business data for insights and visualizations!</p>', unsafe_allow_html=True)
 
-    # Add custom CSS
+    # Existing CSS (unchanged)
     st.markdown("""
         <style>
         .chat-container {
@@ -457,7 +578,7 @@ def ai_assistant_page():
         </style>
     """, unsafe_allow_html=True)
 
-    # Prepare enriched data
+    # Prepare enriched data (unchanged)
     with st.spinner("🔄 Preparing enriched data for AI analysis..."):
         if 'enriched_data' not in st.session_state or st.session_state.get('refresh_data', False):
             enriched_df, enriched_info = prepare_enriched_data()
@@ -479,15 +600,12 @@ def ai_assistant_page():
         </div>
     """, unsafe_allow_html=True)
 
-    # Sidebar: API Configuration and Actions
+    # Sidebar 
     with st.sidebar:
         st.markdown(f'<h3 style="color: {COLORS["secondary"]};">🛠️ Assistant Settings</h3>', unsafe_allow_html=True)
-
-        # API Configuration
         api_endpoint = os.getenv('EYQ_INCUBATOR_ENDPOINT')
         api_key = os.getenv('EYQ_INCUBATOR_KEY')
         api_version = os.getenv('API_VERSION', '2023-05-15')
-
         if api_endpoint and api_key:
             st.session_state.eyq_endpoint = api_endpoint
             st.session_state.eyq_api_key = api_key
@@ -495,26 +613,16 @@ def ai_assistant_page():
             st.success("✅ EYQ API configured!")
         else:
             st.error("❌ EYQ API configuration missing!")
-            st.markdown("""
-            **Required environment variables:**
-            - `EYQ_INCUBATOR_ENDPOINT`
-            - `EYQ_INCUBATOR_KEY`
-            - `API_VERSION` (optional)
-            """)
             return
-
-        # Quick actions
         st.markdown(f'<h3 style="color: {COLORS["secondary"]};">🚀 Quick Actions</h3>', unsafe_allow_html=True)
         if st.button("🔄 New Conversation"):
             st.session_state.ai_messages = []
             st.rerun()
-
         if st.button("📊 Refresh Data"):
             st.session_state.pop('enriched_data', None)
             st.session_state.pop('enriched_info', None)
             st.session_state.refresh_data = True
             st.rerun()
-        # download enriched data
         if st.button("📥 Download Enriched Data"):
             if 'enriched_data' in st.session_state:
                 enriched_df = st.session_state.enriched_data
@@ -526,15 +634,8 @@ def ai_assistant_page():
                     mime='text/csv',
                     key='download_enriched_data'
                 )
-                
             else:
                 st.error("❌ No enriched data available to download. Please refresh the data first.")
-        
-            
-        
-                
-
-        # Data info
         st.markdown(f'<h3 style="color: {COLORS["secondary"]};">📋 Enriched Data Info</h3>', unsafe_allow_html=True)
         with st.expander("🔍 Data Details", expanded=False):
             st.write(f"**Total Rows:** {len(enriched_df):,}")
@@ -553,13 +654,10 @@ def ai_assistant_page():
             st.write(f"• Location: {len(location_cols)}")
             st.write(f"• Employee: {len(employee_cols)}")
 
-
-    # Main chat interface
+    # Main chat interface (unchanged welcome message and data preview)
     st.markdown("---")
     if 'ai_messages' not in st.session_state:
         st.session_state.ai_messages = []
-
-    # Display welcome message
     if not st.session_state.ai_messages:
         st.markdown(f"""
         <div class="chat-message assistant-message">
@@ -572,18 +670,14 @@ def ai_assistant_page():
                 <br>• 🏪 Assess store performance and location analysis
                 <br>• 💰 Generate financial insights and KPIs
                 <br>• 🔍 Discover patterns and business opportunities
-               
-                
-            
-       
+            </div>
+        </div>
         """, unsafe_allow_html=True)
-
-    # Display dataset preview
     with st.expander("📊 Preview: Enriched Business Data", expanded=False):
         col1, col2 = st.columns([3, 1])
         with col1:
             display_cols = []
-            important_cols = enriched_df.columns.tolist() #all columns
+            important_cols = enriched_df.columns.tolist()
             for col in important_cols:
                 if col in enriched_df.columns:
                     display_cols.append(col)
@@ -591,7 +685,6 @@ def ai_assistant_page():
                 if col not in display_cols and len(display_cols) < 12:
                     display_cols.append(col)
             st.dataframe(enriched_df[display_cols].head(10), use_container_width=True)
-
         with col2:
             st.write("**Quick Stats:**")
             if 'montant_total' in enriched_df.columns:
@@ -609,27 +702,23 @@ def ai_assistant_page():
         st.write("**Available columns:**")
         st.write(", ".join(enriched_df.columns))
 
-    # Display chat history
+    # Display chat history (unchanged)
     st.markdown('<div class="chat-container">', unsafe_allow_html=True)
     for message in st.session_state.ai_messages:
         role = message['role']
         content = message.get('content', '')
         figure = message.get('figure', None)
         interpretation = message.get('interpretation', '')
-
         message_class = 'user-message' if role == 'user' else 'assistant-message'
         header_class = 'user-header' if role == 'user' else 'assistant-header'
         header_text = 'You' if role == 'user' else '🤖 AI Business Analyst'
-
         st.markdown(f"""
             <div class="chat-message {message_class}">
                 <div class="message-header {header_class}">{header_text}</div>
                 <div class="message-content">{content}</div>
         """, unsafe_allow_html=True)
-
         if figure:
             st.pyplot(figure)
-
         if interpretation:
             st.markdown(f"""
                 <div class="interpretation-box">
@@ -637,30 +726,34 @@ def ai_assistant_page():
                     {interpretation.replace('\n', '<br>')}
                 </div>
             """, unsafe_allow_html=True)
-
         st.markdown('</div>', unsafe_allow_html=True)
 
-    # Chat input
+    # Chat input and processing
     user_input = st.chat_input(
         "💬 Ask your question about the data (e.g., 'Show top selling products by category' or 'Analyze sales trends over time')",
         key="chat_input"
     )
-
     if user_input and user_input.strip():
-        st.session_state.ai_messages.append({
-            'role': 'user',
-            'content': user_input
-        })
-
+        st.session_state.ai_messages.append({'role': 'user', 'content': user_input})
         with st.spinner('🧠 Analyzing your request...'):
-            response_message = process_ai_request(
-                user_input,
-                enriched_df,
-                st.session_state.ai_messages,
-                st.session_state.eyq_endpoint,
-                st.session_state.eyq_api_key,
-                st.session_state.eyq_api_version
-            )
+            if mode == "V1 (Classic)":
+                response_message = process_ai_request(
+                    user_input,
+                    enriched_df,
+                    st.session_state.ai_messages,
+                    st.session_state.eyq_endpoint,
+                    st.session_state.eyq_api_key,
+                    st.session_state.eyq_api_version
+                )
+            else:  # V2 (BETA - Agentic)
+                response_message = agentic_orchestrator(
+                    user_input,
+                    enriched_df,
+                    st.session_state.ai_messages,
+                    st.session_state.eyq_endpoint,
+                    st.session_state.eyq_api_key,
+                    st.session_state.eyq_api_version
+                )
             st.session_state.ai_messages.append(response_message)
             st.rerun()
 

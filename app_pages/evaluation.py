@@ -1,14 +1,20 @@
+# app_pages/evaluation_page.py
 import streamlit as st
 import pandas as pd
 import plotly.express as px
 import time
-import os
+import numpy as np 
 import re
+import logging
 import matplotlib.pyplot as plt
 from dotenv import load_dotenv
 from fuzzywuzzy import fuzz
 from sentence_transformers import SentenceTransformer, util
-from app_pages.ai_assistant import process_ai_request, prepare_enriched_data
+from app_pages.ai_assistant import process_ai_request, prepare_enriched_data, agentic_orchestrator
+
+# Configure logging
+logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
 # Load .env file
 load_dotenv()
@@ -32,41 +38,196 @@ COLORS = {
     'accent': '#8B5CF6',
 }
 
+def normalize_text(text):
+    """Normalize text for consistent relevancy calculation."""
+    if not isinstance(text, str):
+        text = str(text)
+    text = text.lower().strip()
+    text = re.sub(r'```python\n.*?\n```', '', text, flags=re.DOTALL).strip()
+    text = re.sub(r'Name:\s*\w+,\s*dtype:\s*\w+', '', text).strip()  # Remove Pandas metadata
+    text = re.sub(r'\s+', ' ', text)
+    return text
+
+def parse_pandas_output(response_text):
+    """Parse Pandas-style output or Python list-style responses to extract key data."""
+    response_text = normalize_text(response_text)
+    # Extract key-value pairs (e.g., 'Bizerte 49.085181' -> {'Bizerte': 49.085181})
+    pairs = re.findall(r'(\w[\w\s-]*\w)\s+([\d]+(?:\.\d+)?)', response_text)
+    result_dict = {}
+    for pair in pairs:
+        try:
+            result_dict[pair[0]] = float(pair[1])
+        except ValueError as e:
+            logger.warning(f"Failed to convert '{pair[1]}' to float: {str(e)}")
+            continue
+    
+    # Extract names from Python list-style responses (e.g., ['Anouk Dijoux', 'Jules Renault'])
+    list_names = re.findall(r'(?:"([^"]+)"|\'([^\']+)\')\s*(?:,\s*(?:"([^"]+)"|\'([^\']+)\')\s*)*', response_text)
+    items = []
+    for match in list_names:
+        items.extend([name for name in match if name])
+    
+    # Extract standalone items, excluding numbers, dictionary keys, and Pandas metadata
+    standalone_items = re.findall(r'\b[\w\s-]+\b', response_text)
+    items.extend([item for item in standalone_items 
+                  if not re.match(r'^\d+(?:\.\d+)?$', item)  # Exclude numbers
+                  and item not in result_dict  # Exclude dictionary keys
+                  and item not in items  # Exclude already extracted names
+                  and item not in ('produit_catégorie', 'name', 'montant_total', 'dtype', 'float64')])  # Exclude Pandas metadata
+    
+    logger.debug(f"Parsed items: {items}")
+    logger.debug(f"Parsed dict: {result_dict}")
+    return result_dict, items
+
 def is_response_correct(response, ground_truth, enriched_df, query, threshold=85):
     """Evaluate response correctness with flexible matching."""
-    response_text = str(response).lower().strip()
+    response_text = normalize_text(response)
     query_lower = query.lower().strip()
-    ground_truth_text = str(ground_truth).lower().strip()
+    response_dict, response_items = parse_pandas_output(response_text)
 
     # Handle visualization queries
     if "plot" in query_lower or "chart" in query_lower:
-        if "visualization" in ground_truth_text and ("plot" in response_text or "chart" in response_text):
+        if "visualization" in normalize_text(ground_truth) and ("plot" in response_text or "chart" in response_text):
+            return True
+        return fuzz.partial_ratio(response_text, normalize_text(ground_truth)) >= threshold
+
+    # Handle "Name 3 clients" query
+    if "name 3 clients" in query_lower:
+        if 'client_nom' not in enriched_df.columns:
+            logger.warning("Column 'client_nom' not found in dataset.")
+            return False
+        valid_names = set(enriched_df['client_nom'].str.lower().drop_duplicates())
+        valid_count = sum(1 for item in response_items if item.lower() in valid_names)
+        return valid_count >= 3
+
+    # Handle list-based ground truths (e.g., top 3 product categories)
+    if isinstance(ground_truth, list):
+        valid_items = set(str(item).lower() for item in ground_truth)
+        valid_count = sum(1 for item in response_items if item.lower() in valid_items)
+        logger.debug(f"Valid items: {valid_items}, Response items: {response_items}, Valid count: {valid_count}")
+        if "top 3 product categories" in query_lower:
+            return valid_count >= min(3, len(valid_items))
+        return valid_count >= len(ground_truth) * 0.8
+
+    # Handle numerical ground truths
+    if isinstance(ground_truth, (int, float)):
+        numbers = re.findall(r'\b\d+(?:\.\d+)?\b', response_text)
+        if numbers:
+            try:
+                response_number = float(numbers[-1])
+                return abs(response_number - ground_truth) < 1e-3
+            except ValueError:
+                return False
+        return False
+
+    # Handle tuple-based ground truths
+    if isinstance(ground_truth, tuple):
+        ground_truth_text = normalize_text(f"{ground_truth[0]} {ground_truth[1]}")
+        if ground_truth_text in response_text or all(str(item).lower() in response_text for item in ground_truth):
             return True
         return fuzz.partial_ratio(response_text, ground_truth_text) >= threshold
 
-    # Handle list-based queries (e.g., "Name 3 clients")
-    if "name 3 clients" in query_lower:
-        valid_items = set(enriched_df['client_nom'].drop_duplicates().str.lower().tolist())
-        response_items = re.findall(r'\b[\w\s-]+\b', response_text)
-        if len(response_items) < 3:
-            return False
-        valid_count = sum(1 for item in response_items if item in valid_items)
-        return valid_count >= 3
+    # Handle dictionary-based ground truths
+    if isinstance(ground_truth, dict):
+        ground_dict = {k.lower(): v for k, v in ground_truth.items()}
+        if response_dict:
+            matches = sum(1 for k, v in ground_dict.items() 
+                         if k in response_dict and abs(v - response_dict[k]) < 1e-3)
+            return matches >= len(ground_dict) * 0.8
+        return False
 
-    # Handle other list-based queries (e.g., "List client addresses")
-    if isinstance(ground_truth, list):
-        valid_items = set(enriched_df['client_ville'].drop_duplicates().str.lower().tolist())
-        response_items = re.findall(r'\b[\w\s-]+\b', response_text)
-        valid_count = sum(1 for item in response_items if item in valid_items)
-        return valid_count >= len(ground_truth) * 0.8
-
-    # Exact or substring match
+    # Default string comparison
+    ground_truth_text = normalize_text(ground_truth)
     if ground_truth_text in response_text or response_text in ground_truth_text:
         return True
+    return fuzz.partial_ratio(response_text, ground_truth_text) >= threshold
 
-    # Fuzzy matching
-    similarity = fuzz.partial_ratio(response_text, ground_truth_text)
-    return similarity >= threshold
+def compute_relevancy_score(response, ground_truth, query, enriched_df, similarity_model):
+    """Compute relevancy score consistently for a single response."""
+    response_text = normalize_text(response)
+    query_lower = query.lower().strip()
+    response_dict, response_items = parse_pandas_output(response_text)
+
+    # Handle numerical ground truths
+    if isinstance(ground_truth, (int, float)):
+        numbers = re.findall(r'\b\d+(?:\.\d+)?\b', response_text)
+        if numbers:
+            try:
+                response_number = float(numbers[-1])
+                if abs(response_number - ground_truth) < 1e-3:
+                    logger.debug(f"Numerical match: {response_number} ≈ {ground_truth}")
+                    return 1.0
+                else:
+                    logger.debug(f"Numerical mismatch: {response_number} ≠ {ground_truth}")
+                    return 0.0
+            except ValueError as e:
+                logger.warning(f"Failed to convert response number '{numbers[-1]}': {str(e)}")
+                return 0.0
+        logger.warning("No numerical value found in response.")
+        return 0.0
+
+    # Handle "Name 3 clients" query
+    if "name 3 clients" in query_lower:
+        if 'client_nom' not in enriched_df.columns:
+            logger.warning("Column 'client_nom' not found in dataset.")
+            return 0.0
+        valid_names = set(enriched_df['client_nom'].str.lower().drop_duplicates())
+        valid_count = sum(1 for item in response_items if item.lower() in valid_names)
+        return 1.0 if valid_count >= 3 else valid_count / 3.0
+
+    # Handle "top 3 product categories" query
+    if "top 3 product categories" in query_lower:
+        if isinstance(ground_truth, list):
+            valid_items = set(str(item).lower() for item in ground_truth)
+            valid_count = sum(1 for item in response_items if item.lower() in valid_items)
+            logger.debug(f"Valid items: {valid_items}, Response items: {response_items}, Valid count: {valid_count}")
+            return 1.0 if valid_count >= min(3, len(valid_items)) else valid_count / max(len(ground_truth), 1)
+        return 0.0
+
+    # Handle other specific queries (plot, chart, etc.)
+    if "plot" in query_lower or "chart" in query_lower or "above 50" in query_lower:
+        is_correct = is_response_correct(response, ground_truth, enriched_df, query)
+        return 1.0 if is_correct else 0.0
+
+    # Handle list-based ground truths
+    if isinstance(ground_truth, list):
+        valid_items = set(str(item).lower() for item in ground_truth)
+        valid_count = sum(1 for item in response_items if item.lower() in valid_items)
+        return valid_count / max(len(ground_truth), 1)
+
+    # Handle tuple-based ground truths
+    if isinstance(ground_truth, tuple):
+        ground_truth_text = normalize_text(f"{ground_truth[0]} {ground_truth[1]}")
+        if similarity_model:
+            try:
+                embeddings = similarity_model.encode([response_text, ground_truth_text])
+                similarity = util.cos_sim(embeddings[0], embeddings[1]).item()
+                logger.debug(f"Semantic similarity: {similarity}")
+                return similarity
+            except Exception as e:
+                logger.warning(f"Semantic similarity failed: {str(e)}. Falling back to fuzzy matching.")
+        return fuzz.ratio(response_text, ground_truth_text) / 100
+
+    # Handle dictionary-based ground truths
+    if isinstance(ground_truth, dict):
+        ground_dict = {k.lower(): v for k, v in ground_truth.items()}
+        if response_dict:
+            matches = sum(1 for k, v in ground_dict.items() 
+                         if k in response_dict and abs(v - response_dict[k]) < 1e-3)
+            return matches / max(len(ground_dict), 1)
+        return fuzz.ratio(response_text, normalize_text(str(ground_truth))) / 100
+
+    # Default string comparison
+    ground_truth_text = normalize_text(ground_truth)
+    if similarity_model:
+        try:
+            embeddings = similarity_model.encode([response_text, ground_truth_text])
+            similarity = util.cos_sim(embeddings[0], embeddings[1]).item()
+            logger.debug(f"Semantic similarity: {similarity}")
+            return similarity
+        except Exception as e:
+            logger.warning(f"Semantic similarity failed: {str(e)}. Falling back to fuzzy matching.")
+    return fuzz.ratio(response_text, ground_truth_text) / 100
 
 def is_plot_correct(response, query, enriched_df):
     """Evaluate if a visualization matches the query intent."""
@@ -77,72 +238,16 @@ def is_plot_correct(response, query, enriched_df):
     query_lower = query.lower()
 
     if 'sales by product category' in query_lower:
-        # Check required columns
         if 'produit_catégorie' not in enriched_df.columns:
             st.warning("⚠️ Column 'produit_catégorie' not found in dataset. Skipping plot validation.")
-            return True  # Assume correct if data unavailable
+            return True
         if 'montant_total' not in enriched_df.columns:
             st.warning("⚠️ Column 'montant_total' not found in dataset. Skipping sales data validation.")
-            return True  # Assume correct if data unavailable
+            return True
 
-        # Compute expected sales
         expected_sales = enriched_df.groupby('produit_catégorie')['montant_total'].sum().to_dict()
         expected_categories = set(enriched_df['produit_catégorie'].str.lower().unique())
 
-        # Handle Plotly figures
-        if isinstance(fig, dict) and 'data' in fig:
-            try:
-                # Check plot type
-                plot_type = fig['data'][0]['type']
-                if plot_type not in ['bar', 'column']:
-                    st.warning(f"⚠️ Expected bar/column chart, got {plot_type}.")
-                    return False
-
-                # Check axes for categories (handles both x and y axis cases)
-                x_data = fig['data'][0].get('x', [])
-                y_data = fig['data'][0].get('y', [])
-                
-                # Determine which axis contains categories
-                if len(x_data) > 0 and any(isinstance(x, str) for x in x_data):
-                    # Categories are on x-axis
-                    x_labels = set(str(x).lower() for x in x_data)
-                    if not x_labels.intersection(expected_categories):
-                        # Check if categories might be on y-axis instead
-                        y_labels = set(str(y).lower() for y in y_data)
-                        if not y_labels.intersection(expected_categories):
-                            st.warning("⚠️ Plot axes do not contain expected product categories.")
-                            return False
-                        else:
-                            # Categories are on y-axis, values on x-axis
-                            plot_data = dict(zip(y_data, x_data))
-                    else:
-                        # Categories are on x-axis, values on y-axis
-                        plot_data = dict(zip(x_data, y_data))
-                elif len(y_data) > 0 and any(isinstance(y, str) for y in y_data):
-                    # Categories are on y-axis
-                    y_labels = set(str(y).lower() for y in y_data)
-                    if not y_labels.intersection(expected_categories):
-                        st.warning("⚠️ Plot y-axis does not contain expected product categories.")
-                        return False
-                    # Categories are on y-axis, values on x-axis
-                    plot_data = dict(zip(y_data, x_data))
-                else:
-                    st.warning("⚠️ Could not determine which axis contains categories.")
-                    return False
-
-                # Compare plotted sales to expected sales
-                for cat, val in plot_data.items():
-                    expected_val = expected_sales.get(cat, 0)
-                    if abs(val - expected_val) > 1e-2:  # Allow small float errors
-                        st.warning(f"⚠️ Sales value for category '{cat}' ({val}) does not match expected ({expected_val}).")
-                        return False
-
-                return True
-            except Exception as e:
-                st.warning(f"⚠️ Plot validation failed: {str(e)}")
-                return False
-
-        # Handle Matplotlib figures
         if isinstance(fig, plt.Figure):
             try:
                 axes = fig.get_axes()
@@ -151,18 +256,14 @@ def is_plot_correct(response, query, enriched_df):
                     return False
                 ax = axes[0]
                 
-                # Check axes for categories
                 x_labels = [label.get_text().lower() for label in ax.get_xticklabels()]
                 y_labels = [label.get_text().lower() for label in ax.get_yticklabels()]
                 
-                # Determine which axis contains categories
                 if any(cat in x_labels for cat in expected_categories):
-                    # Categories are on x-axis
                     plot_data = {label.get_text().lower(): rect.get_height() 
                                for label, rect in zip(ax.get_xticklabels(), 
                                                     [b for b in ax.get_children() if isinstance(b, plt.Rectangle)])}
                 elif any(cat in y_labels for cat in expected_categories):
-                    # Categories are on y-axis
                     plot_data = {label.get_text().lower(): rect.get_width()
                                for label, rect in zip(ax.get_yticklabels(),
                                                     [b for b in ax.get_children() if isinstance(b, plt.Rectangle)])}
@@ -170,9 +271,8 @@ def is_plot_correct(response, query, enriched_df):
                     st.warning("⚠️ Could not find expected categories on either axis.")
                     return False
                 
-                # Compare plotted sales to expected sales
                 for cat, val in plot_data.items():
-                    expected_val = expected_sales.get(cat.title(), 0)  # Adjust case if needed
+                    expected_val = expected_sales.get(cat.title(), 0)
                     if abs(val - expected_val) > 1e-2:
                         st.warning(f"⚠️ Sales value for category '{cat}' ({val}) does not match expected ({expected_val}).")
                         return False
@@ -181,11 +281,32 @@ def is_plot_correct(response, query, enriched_df):
                 st.warning(f"⚠️ Plot validation failed: {str(e)}")
                 return False
 
-    return True  # Default to True for other plot types
+    return True
 
 def evaluation_page():
+    # Initialize or reset session state for evaluation results
+    if 'evaluation_results' not in st.session_state or 'evaluation_mode' not in st.session_state or st.session_state.evaluation_mode != st.session_state.get('last_mode', None):
+        st.session_state.evaluation_results = {'V1': None, 'V2': None}
+        st.session_state.last_mode = None
+
     st.markdown(f'<h1 style="color: {COLORS["primary"]};">📈 Chatbot Evaluation</h1>', unsafe_allow_html=True)
-    st.markdown(f'<p style="color: {COLORS["text"]};">Evaluate the AI Business Analyst with predefined tests or custom queries.</p>', unsafe_allow_html=True)
+    
+    # Dropdown for mode selection
+    col1, col2 = st.columns([3, 1])
+    with col1:
+        st.markdown(f'<p style="color: {COLORS["text"]};">Evaluate the AI Business Analyst with predefined tests or custom queries.</p>', unsafe_allow_html=True)
+    with col2:
+        mode = st.selectbox(
+            "Select Assistant Mode",
+            ["V1 (Classic)", "V2 (BETA - Agentic)"],
+            key="evaluation_mode",
+            help="Choose between classic (V1) and agentic (V2) modes"
+        )
+
+    # Reset results for the current mode when mode changes
+    if st.session_state.last_mode != mode:
+        st.session_state.evaluation_results[mode[:2]] = None
+        st.session_state.last_mode = mode
 
     # CSS for consistent styling
     st.markdown("""
@@ -211,6 +332,21 @@ def evaluation_page():
             margin-bottom: 15px;
             box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
         }
+        .comparison-table {
+            border-collapse: collapse;
+            width: 100%;
+        }
+        .comparison-table th, .comparison-table td {
+            border: 1px solid #ddd;
+            padding: 8px;
+            text-align: center;
+        }
+        .comparison-table th {
+            background-color: #f2f2f2;
+        }
+        .highlight-v2 {
+            background-color: #e6ffed;
+        }
         </style>
     """, unsafe_allow_html=True)
 
@@ -222,94 +358,90 @@ def evaluation_page():
             return
         st.markdown(f'<div class="data-status"><strong>📊 Data Status:</strong> {enriched_info}</div>', unsafe_allow_html=True)
 
-    # Predefined test queries and ground truths
+        # Predefined test queries and ground truths
     test_queries = [
         "How many unique stores are there?",
         "Who is the oldest client?",
         "Plot sales by product category",
         "Name 3 clients",
-        "List client addresses"
+        "List client addresses",
+        "What is the total sales amount across all stores?",
+        "Which store has the highest sales, and what is the amount?",
+        "List the top 3 product categories by sales.",
+        "Summarize the average age of clients by city.",
+        "Which clients are 80 years old?"
     ]
     ground_truths = [
         enriched_df['magasin_nom_magasin'].nunique() if 'magasin_nom_magasin' in enriched_df.columns else None,
         enriched_df['client_nom'][enriched_df['client_âge'].idxmax()] if 'client_âge' in enriched_df.columns else None,
         "Visualization of sales by product category",
-        "Any 3 valid client names",
-        enriched_df['client_ville'].drop_duplicates().tolist() if 'client_ville' in enriched_df.columns else []
+        enriched_df['client_nom'].drop_duplicates().tolist() if 'client_nom' in enriched_df.columns else [],  
+        enriched_df['client_ville'].drop_duplicates().tolist() if 'client_ville' in enriched_df.columns else [],
+        enriched_df['montant_total'].sum() if 'montant_total' in enriched_df.columns else None,
+        (enriched_df.groupby('magasin_nom_magasin')['montant_total'].sum().idxmax(),
+        enriched_df.groupby('magasin_nom_magasin')['montant_total'].sum().max())
+        if 'magasin_nom_magasin' in enriched_df.columns and 'montant_total' in enriched_df.columns else None,
+        enriched_df.groupby('produit_catégorie')['montant_total'].sum().nlargest(3).index.tolist()
+        if 'produit_catégorie' in enriched_df.columns and 'montant_total' in enriched_df.columns else [],
+        enriched_df.groupby('client_ville')['client_âge'].mean().to_dict()
+        if 'client_ville' in enriched_df.columns and 'client_âge' in enriched_df.columns else {},
+        enriched_df[enriched_df['client_âge'] == 80]['client_nom'].unique().tolist()
+        if 'client_âge' in enriched_df.columns and 'client_nom' in enriched_df.columns else []
     ]
-
     # Run evaluation
     results = []
     response_times = []
+    relevancy_scores = []
     for query, truth in zip(test_queries, ground_truths):
         query_lower = query.lower()
         start_time = time.time()
-        response = process_ai_request(
-            query,
-            enriched_df,
-            [],
-            st.session_state.get('eyq_endpoint', ''),
-            st.session_state.get('eyq_api_key', ''),
-            st.session_state.get('eyq_api_version', '2023-05-15')
-        )
+        if mode == "V1 (Classic)":
+            response = process_ai_request(
+                query,
+                enriched_df,
+                [],
+                st.session_state.get('eyq_endpoint', ''),
+                st.session_state.get('eyq_api_key', ''),
+                st.session_state.get('eyq_api_version', '2023-05-15')
+            )
+        else:  # V2 (BETA - Agentic)
+            response = agentic_orchestrator(
+                query,
+                enriched_df,
+                [],
+                st.session_state.get('eyq_endpoint', ''),
+                st.session_state.get('eyq_api_key', ''),
+                st.session_state.get('eyq_api_version', '2023-05-15')
+            )
         end_time = time.time()
         response_times.append(end_time - start_time)
         response_text = response.get('interpretation') or response.get('content', '')
         is_correct = is_response_correct(response_text, truth, enriched_df, query)
+        if "plot" in query_lower or "chart" in query_lower:
+            is_correct = is_correct and is_plot_correct(response, query, enriched_df)
+        relevancy = compute_relevancy_score(response_text, truth, query, enriched_df, similarity_model)
+        relevancy_scores.append(relevancy)
         results.append({
             'Query': query,
             'Response': response_text,
             'Ground Truth': truth,
             'Correct': is_correct,
-            'Response Time (s)': end_time - start_time
+            'Response Time (s)': end_time - start_time,
+            'Relevancy Score': relevancy,
+            'Figure': response.get('figure', None)
         })
+
+    # Store results for the current mode
+    st.session_state.evaluation_results[mode[:2]] = results
 
     # Compute metrics
     accuracy = sum(r['Correct'] for r in results) / len(results)
     avg_response_time = sum(response_times) / len(response_times)
-
-    # Semantic similarity evaluation
-    relevancy_score = None
-    try:
-        if similarity_model:
-            similarities = []
-            for r, query in zip(results, test_queries):
-                response = str(r['Response']).lower()
-                ground_truth = str(r['Ground Truth']).lower()
-                if "name 3 clients" in query.lower() or "plot" in query.lower() or "chart" in query.lower():
-                    similarities.append(1.0 if r['Correct'] else 0.0)
-                else:
-                    embeddings = similarity_model.encode([response, ground_truth])
-                    similarity = util.cos_sim(embeddings[0], embeddings[1]).item()
-                    similarities.append(similarity)
-            relevancy_score = sum(similarities) / len(similarities)
-        else:
-            similarities = []
-            for r, query in zip(results, test_queries):
-                response = str(r['Response']).lower()
-                ground_truth = str(r['Ground Truth']).lower()
-                if "name 3 clients" in query.lower() or "plot" in query.lower() or "chart" in query.lower():
-                    similarities.append(1.0 if r['Correct'] else 0.0)
-                else:
-                    similarity = fuzz.ratio(response, ground_truth) / 100
-                    similarities.append(similarity)
-            relevancy_score = sum(similarities) / len(similarities)
-    except Exception as e:
-        st.warning(f"⚠️ Similarity evaluation failed: {str(e)}. Using fuzzy matching.")
-        similarities = []
-        for r, query in zip(results, test_queries):
-            response = str(r['Response']).lower()
-            ground_truth = str(r['Ground Truth']).lower()
-            if "name 3 clients" in query.lower() or "plot" in query.lower() or "chart" in query.lower():
-                similarities.append(1.0 if r['Correct'] else 0.0)
-            else:
-                similarity = fuzz.ratio(response, ground_truth) / 100
-                similarities.append(similarity)
-        relevancy_score = sum(similarities) / len(similarities)
+    avg_relevancy_score = sum(relevancy_scores) / len(relevancy_scores)
 
     # Display metrics in styled boxes
     st.markdown("### 📊 Performance Metrics")
-    col1, col2 = st.columns(2)
+    col1, col2, col3 = st.columns(3)
     
     with col1:
         st.markdown(f"""
@@ -331,27 +463,73 @@ def evaluation_page():
         </div>
         """, unsafe_allow_html=True)
     
-    st.markdown(f"""
-    <div class="metric-box">
-        <h3 style="color: {COLORS['primary']}; margin-top: 0;">Relevancy Score</h3>
-        <h1 style="color: {COLORS['success'] if relevancy_score >= 0.8 else COLORS['warning'] if relevancy_score >= 0.5 else COLORS['error']}; margin-bottom: 0;">
-            {relevancy_score:.1%}
-        </h1>
-    </div>
-    """, unsafe_allow_html=True)
+    with col3:
+        st.markdown(f"""
+        <div class="metric-box">
+            <h3 style="color: {COLORS['primary']}; margin-top: 0;">Relevancy Score</h3>
+            <h1 style="color: {COLORS['success'] if avg_relevancy_score >= 0.8 else COLORS['warning'] if avg_relevancy_score >= 0.5 else COLORS['error']}; margin-bottom: 0;">
+                {avg_relevancy_score:.1%}
+            </h1>
+        </div>
+        """, unsafe_allow_html=True)
+
+    # Comparison table for V1 vs. V2
+    if st.session_state.evaluation_results['V1'] and st.session_state.evaluation_results['V2']:
+        st.markdown("### ⚖️ V1 vs. V2 Comparison")
+        comparison_data = []
+        for mode_key in ['V1', 'V2']:
+            mode_results = st.session_state.evaluation_results[mode_key]
+            mode_accuracy = sum(r['Correct'] for r in mode_results) / len(mode_results)
+            mode_avg_time = sum(r['Response Time (s)'] for r in mode_results) / len(mode_results)
+            mode_relevancy = sum(
+                r['Relevancy Score'] if 'Relevancy Score' in r 
+                else compute_relevancy_score(r['Response'], r['Ground Truth'], r['Query'], enriched_df, similarity_model)
+                for r in mode_results
+            ) / len(mode_results)
+            comparison_data.append({
+                'Mode': mode_key,
+                'Accuracy': f"{mode_accuracy:.1%}",
+                'Avg. Response Time': f"{mode_avg_time:.2f}s",
+                'Relevancy Score': f"{mode_relevancy:.1%}"
+            })
+        comparison_df = pd.DataFrame(comparison_data)
+        v1_time = float(comparison_data[0]['Avg. Response Time'][:-1])
+        v2_time = float(comparison_data[1]['Avg. Response Time'][:-1])
+        v2_class = 'highlight-v2' if v2_time < v1_time else ''
+        st.markdown(f"""
+        <table class="comparison-table">
+            <tr>
+                <th>Mode</th>
+                <th>Accuracy</th>
+                <th>Avg. Response Time</th>
+                <th>Relevancy Score</th>
+            </tr>
+            <tr>
+                <td>{comparison_data[0]['Mode']}</td>
+                <td>{comparison_data[0]['Accuracy']}</td>
+                <td>{comparison_data[0]['Avg. Response Time']}</td>
+                <td>{comparison_data[0]['Relevancy Score']}</td>
+            </tr>
+            <tr class="{v2_class}">
+                <td>{comparison_data[1]['Mode']}</td>
+                <td>{comparison_data[1]['Accuracy']}</td>
+                <td>{comparison_data[1]['Avg. Response Time']}</td>
+                <td>{comparison_data[1]['Relevancy Score']}</td>
+            </tr>
+        </table>
+        <p style="color: {COLORS['success']};">🎉 V2 shows improved response times!</p>
+        """, unsafe_allow_html=True)
 
     # Visualize results with improved charts
     st.markdown("### 📈 Evaluation Results")
     
-    # Convert boolean to string for better display
     df_results = pd.DataFrame(results)
     df_results['Correct'] = df_results['Correct'].map({True: '✅ Correct', False: '❌ Incorrect'})
     
-    # Accuracy by query - donut chart
     fig_accuracy = px.pie(
         df_results, 
         names='Correct', 
-        title='Overall Accuracy',
+        title=f'Overall Accuracy ({mode})',
         hole=0.4,
         color='Correct',
         color_discrete_map={'✅ Correct': COLORS['success'], '❌ Incorrect': COLORS['error']}
@@ -360,13 +538,12 @@ def evaluation_page():
     fig_accuracy.update_layout(showlegend=False)
     st.plotly_chart(fig_accuracy, use_container_width=True)
     
-    # Query performance breakdown
     fig_query = px.bar(
         df_results, 
         x='Query', 
         y='Response Time (s)', 
         color='Correct',
-        title='Query Performance Breakdown',
+        title=f'Query Performance Breakdown ({mode})',
         text='Response Time (s)',
         color_discrete_map={'✅ Correct': COLORS['success'], '❌ Incorrect': COLORS['error']}
     )
@@ -387,12 +564,12 @@ def evaluation_page():
             with col1:
                 st.markdown(f"**Response**: {result['Response']}")
                 st.markdown(f"**Ground Truth**: {result['Ground Truth']}")
+                st.markdown(f"**Relevancy Score**: {result['Relevancy Score']:.1%}")
             with col2:
                 st.metric("Response Time", f"{result['Response Time (s)']:.2f}s")
-            response = process_ai_request(result['Query'], enriched_df, [], st.session_state.get('eyq_endpoint', ''), st.session_state.get('eyq_api_key', ''), st.session_state.get('eyq_api_version', '2023-05-15'))
-            if 'figure' in response and response['figure']:
+            if result['Figure']:
                 st.markdown("**Visualization:**")
-                st.pyplot(response['figure'])
+                st.pyplot(result['Figure'])
 
     # User-driven evaluation
     st.markdown("### 🧪 Try Your Own Query")
@@ -403,7 +580,6 @@ def evaluation_page():
         user_ground_truth = st.text_input("Enter expected response (optional):", 
                                         placeholder="e.g., List of top 5 products",
                                         key="user_ground_truth_input")
-        
         submitted = st.form_submit_button("🚀 Evaluate Query")
     
     if submitted:
@@ -412,18 +588,28 @@ def evaluation_page():
         else:
             with st.spinner("🧠 Processing your query..."):
                 start_time = time.time()
-                response = process_ai_request(
-                    user_query,
-                    enriched_df,
-                    [],
-                    st.session_state.get('eyq_endpoint', ''),
-                    st.session_state.get('eyq_api_key', ''),
-                    st.session_state.get('eyq_api_version', '2023-05-15')
-                )
+                if mode == "V1 (Classic)":
+                    response = process_ai_request(
+                        user_query,
+                        enriched_df,
+                        [],
+                        st.session_state.get('eyq_endpoint', ''),
+                        st.session_state.get('eyq_api_key', ''),
+                        st.session_state.get('eyq_api_version', '2023-05-15')
+                    )
+                else:
+                    response = agentic_orchestrator(
+                        user_query,
+                        enriched_df,
+                        [],
+                        st.session_state.get('eyq_endpoint', ''),
+                        st.session_state.get('eyq_api_key', ''),
+                        st.session_state.get('eyq_api_version', '2023-05-15')
+                    )
                 end_time = time.time()
                 response_text = response.get('interpretation') or response.get('content', '')
+                relevancy = compute_relevancy_score(response_text, user_ground_truth or "N/A", user_query, enriched_df, similarity_model)
                 
-                # Display results in a nicely formatted way
                 st.markdown("---")
                 st.markdown("### 📝 Evaluation Results")
                 
@@ -437,8 +623,11 @@ def evaluation_page():
                 
                 if user_ground_truth:
                     is_correct = is_response_correct(response_text, user_ground_truth, enriched_df, user_query)
+                    if "plot" in user_query.lower() or "chart" in user_query.lower():
+                        is_correct = is_correct and is_plot_correct(response, user_query, enriched_df)
                     st.markdown(f"**Evaluation:** {'✅ Correct' if is_correct else '❌ Incorrect'}")
                     st.markdown(f"**Expected Answer:** `{user_ground_truth}`")
+                    st.markdown(f"**Relevancy Score:** {relevancy:.1%}")
                 
                 if 'figure' in response and response['figure']:
                     st.markdown("**Generated Visualization:**")
