@@ -267,6 +267,7 @@ def process_ai_request(user_question, enriched_df, messages, api_endpoint, api_k
         # [Brief comment describing the code]
         [Your code here]
         print("[Result description]: [Result]")
+        Always format printed outputs to exclude technical Pandas metadata (e.g., index names, "dtype", etc.).
 
         For client-related queries:Use 'client_nom' for names if available; otherwise, use 'id_client'.
         Use 'client_âge' for age if available.
@@ -300,6 +301,7 @@ def process_ai_request(user_question, enriched_df, messages, api_endpoint, api_k
             # [Brief comment describing the code]
             [Code]
             print("[Result description]: [Result]")
+            Always format printed outputs to exclude technical Pandas metadata (e.g., index names, "dtype", etc.).
 
             For visualizations ("plot", "répartition", etc.), generate plot with matplotlib/seaborn, use plt.figure(figsize=(12, 8)), plt.tight_layout().
             If data is missing, generate code to print: "Information not available due to missing columns: [list columns]."

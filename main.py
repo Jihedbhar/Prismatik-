@@ -5,7 +5,7 @@ os.environ["STREAMLIT_WATCHER_TYPE"] = "poll"
 import streamlit as st
 from app_pages.setup import setup_page
 from app_pages.mapping import mapping_page
-from app_pages.dashboard_owner import business_owner_dashboard
+from app_pages.dashboard import business_owner_dashboard
 from app_pages.ai_assistant import ai_assistant_page
 from app_pages.evaluation import evaluation_page
 

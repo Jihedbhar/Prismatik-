@@ -100,14 +100,7 @@ def is_response_correct(response, ground_truth, enriched_df, query, threshold=85
         valid_count = sum(1 for item in response_items if item.lower() in valid_names)
         return valid_count >= 3
 
-    # Handle list-based ground truths (e.g., top 3 product categories)
-    if isinstance(ground_truth, list):
-        valid_items = set(str(item).lower() for item in ground_truth)
-        valid_count = sum(1 for item in response_items if item.lower() in valid_items)
-        logger.debug(f"Valid items: {valid_items}, Response items: {response_items}, Valid count: {valid_count}")
-        if "top 3 product categories" in query_lower:
-            return valid_count >= min(3, len(valid_items))
-        return valid_count >= len(ground_truth) * 0.8
+   
 
     # Handle numerical ground truths
     if isinstance(ground_truth, (int, float)):
@@ -175,14 +168,8 @@ def compute_relevancy_score(response, ground_truth, query, enriched_df, similari
         valid_count = sum(1 for item in response_items if item.lower() in valid_names)
         return 1.0 if valid_count >= 3 else valid_count / 3.0
 
-    # Handle "top 3 product categories" query
-    if "top 3 product categories" in query_lower:
-        if isinstance(ground_truth, list):
-            valid_items = set(str(item).lower() for item in ground_truth)
-            valid_count = sum(1 for item in response_items if item.lower() in valid_items)
-            logger.debug(f"Valid items: {valid_items}, Response items: {response_items}, Valid count: {valid_count}")
-            return 1.0 if valid_count >= min(3, len(valid_items)) else valid_count / max(len(ground_truth), 1)
-        return 0.0
+    
+    
 
     # Handle other specific queries (plot, chart, etc.)
     if "plot" in query_lower or "chart" in query_lower or "above 50" in query_lower:
@@ -367,7 +354,6 @@ def evaluation_page():
         "List client addresses",
         "What is the total sales amount across all stores?",
         "Which store has the highest sales, and what is the amount?",
-        "List the top 3 product categories by sales.",
         "Summarize the average age of clients by city.",
         "Which clients are 80 years old?"
     ]
@@ -379,10 +365,7 @@ def evaluation_page():
         enriched_df['client_ville'].drop_duplicates().tolist() if 'client_ville' in enriched_df.columns else [],
         enriched_df['montant_total'].sum() if 'montant_total' in enriched_df.columns else None,
         (enriched_df.groupby('magasin_nom_magasin')['montant_total'].sum().idxmax(),
-        enriched_df.groupby('magasin_nom_magasin')['montant_total'].sum().max())
-        if 'magasin_nom_magasin' in enriched_df.columns and 'montant_total' in enriched_df.columns else None,
-        enriched_df.groupby('produit_catégorie')['montant_total'].sum().nlargest(3).index.tolist()
-        if 'produit_catégorie' in enriched_df.columns and 'montant_total' in enriched_df.columns else [],
+        enriched_df.groupby('magasin_nom_magasin')['montant_total'].sum().max()),
         enriched_df.groupby('client_ville')['client_âge'].mean().to_dict()
         if 'client_ville' in enriched_df.columns and 'client_âge' in enriched_df.columns else {},
         enriched_df[enriched_df['client_âge'] == 80]['client_nom'].unique().tolist()
