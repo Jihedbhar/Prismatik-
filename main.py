@@ -164,8 +164,8 @@ def main():
         
     # Navigation with selectbox
     st.sidebar.title("🧭 Navigation")
-    page_options = ["home", "setup", "mapping", "dashboard", "ai_assistant", "evaluation", "forecast","elasticity"]
-    page_display = ["Home", "Database Setup", "Table & Column Mapping", "Business Owner Dashboard", "AI Business Analyst","Evaluation","Sales Forecasting", "Price Elasticity Analysis"]
+    page_options = ["home", "setup", "mapping", "dashboard", "ai_assistant", "evaluation", "forecast"]
+    page_display = ["Home", "Database Setup", "Table & Column Mapping", "Business Owner Dashboard", "AI Business Analyst","Evaluation","Sales Forecasting"]
     page = st.sidebar.selectbox(
         "Select Page",
         options=page_options,
