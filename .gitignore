@@ -78,3 +78,5 @@ mappings
 temp
 test.ipynb
 users.json
+results/
+elasticity_data_for_ai.xlsx

@@ -8,6 +8,7 @@ from app_pages.mapping import mapping_page
 from app_pages.dashboard import business_owner_dashboard
 from app_pages.ai_assistant import ai_assistant_page
 from app_pages.evaluation import evaluation_page
+from app_pages.forecast import forecasting_page
 
 
 
@@ -163,8 +164,8 @@ def main():
         
     # Navigation with selectbox
     st.sidebar.title("🧭 Navigation")
-    page_options = ["home", "setup", "mapping", "dashboard", "ai_assistant", "evaluation"]
-    page_display = ["Home", "Database Setup", "Table & Column Mapping", "Business Owner Dashboard", "AI Business Analyst","Evaluation"]
+    page_options = ["home", "setup", "mapping", "dashboard", "ai_assistant", "evaluation", "forecast","elasticity"]
+    page_display = ["Home", "Database Setup", "Table & Column Mapping", "Business Owner Dashboard", "AI Business Analyst","Evaluation","Sales Forecasting", "Price Elasticity Analysis"]
     page = st.sidebar.selectbox(
         "Select Page",
         options=page_options,
@@ -190,6 +191,9 @@ def main():
         ai_assistant_page()
     elif st.session_state.page == "evaluation":
         evaluation_page()
+    elif st.session_state.page == "forecast":
+        forecasting_page()
+
 
 
 if __name__ == "__main__":
