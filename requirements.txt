@@ -12,3 +12,8 @@ sentence-transformers
 sqlalchemy
 psycopg2-binary
 mysql-connector-python
+scikit-learn
+xgboost
+lightgbm
+optuna
+torch
