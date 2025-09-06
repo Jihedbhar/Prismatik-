@@ -1,4 +1,4 @@
-# utils/auth.py - Simplified for 2 roles only
+# utils/auth.py 
 import streamlit as st
 import hashlib
 import json
