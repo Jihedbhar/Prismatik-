@@ -518,7 +518,7 @@ def ai_assistant_page():
     
     st.markdown(f'<p style="color: {COLORS["text"]};">Ask about your business data for insights and visualizations!</p>', unsafe_allow_html=True)
 
-    # Existing CSS (unchanged)
+    # Existing CSS 
     st.markdown("""
         <style>
         .chat-container {
@@ -580,7 +580,7 @@ def ai_assistant_page():
         </style>
     """, unsafe_allow_html=True)
 
-    # Prepare enriched data (unchanged)
+    # Prepare enriched data 
     with st.spinner("🔄 Preparing enriched data for AI analysis..."):
         if 'enriched_data' not in st.session_state or st.session_state.get('refresh_data', False):
             enriched_df, enriched_info = prepare_enriched_data()
@@ -656,7 +656,7 @@ def ai_assistant_page():
             st.write(f"• Location: {len(location_cols)}")
             st.write(f"• Employee: {len(employee_cols)}")
 
-    # Main chat interface (unchanged welcome message and data preview)
+    # Main chat interface 
     st.markdown("---")
     if 'ai_messages' not in st.session_state:
         st.session_state.ai_messages = []
@@ -704,7 +704,7 @@ def ai_assistant_page():
         st.write("**Available columns:**")
         st.write(", ".join(enriched_df.columns))
 
-    # Display chat history (unchanged)
+    # Display chat history 
     st.markdown('<div class="chat-container">', unsafe_allow_html=True)
     for message in st.session_state.ai_messages:
         role = message['role']
